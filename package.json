@@ -3,7 +3,8 @@
   "version": "0.1.9",
   "description": "Homebridge plugin for ISY series of home controllers from universal devices. Unsupported and no longer under active development.",
   "note": "",
-  "main": "index.js",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
   "scripts": {
     "test": "mocha",
     "start": "echo \"Error: configure and run homebridge to start\" && exit 1"
@@ -14,7 +15,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/rodtoll/homebridge-isy-js.git"
+    "url": "https://github.com/sluramod/homebridge-isy-js.git"
   },
   "keywords": [
     "homebridge-plugin",
@@ -25,19 +26,18 @@
     "Siri"
   ],
   "devDependencies": {
-    "mocha": "",
-    "fake-isy-994i": ""
+    "mocha": "^6.1.4",
+    "fake-isy-994i": "^0.2.2"
   },
   "dependencies": {
-    "restler": "",
-    "faye-websocket": "",
-    "xmldoc": "",
-    "isy-js": ""
+    "@types/node": "^12.0.8",
+    "isy-js": "git+https://github.com/sluramod/isy-js.git",
+    "hap-nodejs": "^0.5.0"
   },
   "author": "rodtoll",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/rodtoll/homebridge-isy-js/issues"
+    "url": "https://github.com/sluramod/homebridge-isy-js/issues"
   },
-  "homepage": "https://github.com/rodtoll/homebridge-isy-js"
+  "homepage": "https://github.com/sluramod/homebridge-isy-js"
 }
