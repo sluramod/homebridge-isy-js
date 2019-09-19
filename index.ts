@@ -20,7 +20,9 @@ import {
     CharacteristicEventTypes,
     CharacteristicGetCallback,
     CharacteristicSetCallback,
-    Service as HapService
+    Service as HapService,
+    Accessory,
+    uuid
 } from 'hap-nodejs'
 import {
     AccessoryInformation, ContactSensor,
@@ -50,12 +52,12 @@ function ISYChangeHandler(isy: any, device: ISYNode) {
     }
 }
 
-let Service: typeof HapService, Characteristic: typeof HapCharacteristic
+let Service: typeof HapService, Characteristic: typeof HapCharacteristic, UUIDGen: typeof uuid
 
 export default function (homebridge: any) {
     Service = homebridge.hap.Service;
     Characteristic = homebridge.hap.Characteristic;
-
+    UUIDGen = homebridge.hap.uuid;
     homebridge.registerPlatform("homebridge-isy-js", "isy-js", ISYPlatform);
 }
 
@@ -286,7 +288,7 @@ class ISYPlatform {
 /////////////////////////////////////////////////////////////////////////////////////////////////
 // BASE FOR ALL DEVICES
 
-abstract class ISYAccessoryBaseSetup<T extends ISYNode> {
+abstract class ISYAccessoryBaseSetup<T extends ISYNode> extends Accessory {
     log: Function
 
     device: T
@@ -296,11 +298,12 @@ abstract class ISYAccessoryBaseSetup<T extends ISYNode> {
 
     // Provides common constructor tasks
     protected constructor(log: Function, device: T) {
+        const s = UUIDGen.generate(device.isy.isyAddress + ':' + device.address + 1);
+        super(device.name, s);
         this.log = log;
         this.device = device;
         this.address = device.address;
         this.name = device.name;
-        this.uuid_base = device.isy.isyAddress + ":" + device.address;
     }
 
     abstract handleExternalChange(): void;
