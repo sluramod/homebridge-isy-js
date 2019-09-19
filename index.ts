@@ -56,7 +56,7 @@ export default function (homebridge: any) {
     Service = homebridge.hap.Service;
     Characteristic = homebridge.hap.Characteristic;
 
-    homebridge.registerAccessory("homebridge-isy-js", "isy-js", ISYPlatform);
+    homebridge.registerPlatform("homebridge-isy-js", "isy-js", ISYPlatform);
 }
 
 
@@ -121,6 +121,8 @@ class ISYPlatform {
         this.includeAllScenes = config.includeAllScenes || false
         this.includedScenes = config.includedScenes || []
         this.isy = new ISY(this.host, this.username, this.password, config.elkEnabled || false, ISYChangeHandler, config.useHttps, true, this.debugLoggingEnabled);
+
+        this.accessories = this.accessories.bind(this)
     }
 
     logger(msg: any) {
