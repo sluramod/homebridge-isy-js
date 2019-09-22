@@ -7,7 +7,8 @@
   "types": "lib/index.d.ts",
   "scripts": {
     "test": "mocha",
-    "start": "echo \"Error: configure and run homebridge to start\" && exit 1"
+    "start": "echo \"Error: configure and run homebridge to start\" && exit 1",
+    "scratch": "DEBUG=* node_modules/homebridge/bin/homebridge -D -U scratch -P ."
   },
   "engines": {
     "node": ">4.0.0",
@@ -27,7 +28,8 @@
   ],
   "devDependencies": {
     "mocha": "^6.1.4",
-    "fake-isy-994i": "^0.2.2"
+    "fake-isy-994i": "^0.2.2",
+    "homebridge": "^0.4.50"
   },
   "dependencies": {
     "@types/node": "^12.0.8",

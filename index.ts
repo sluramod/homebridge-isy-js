@@ -10,27 +10,31 @@ import {
     ISYDoorWindowDevice,
     ISYFanDevice,
     ISYFanDeviceState,
-    ISYLightDevice, ISYLockDevice, ISYMotionSensorDevice,
+    ISYLightDevice,
+    ISYLockDevice,
+    ISYMotionSensorDevice,
     ISYNode,
     ISYOutletDevice
 } from "isy-js";
 
 import {
+    Accessory,
     Characteristic as HapCharacteristic,
     CharacteristicEventTypes,
     CharacteristicGetCallback,
     CharacteristicSetCallback,
     Service as HapService,
-    Accessory,
     uuid
 } from 'hap-nodejs'
 import {
-    AccessoryInformation, ContactSensor,
+    ContactSensor,
     Fan,
     GarageDoorOpener,
     Lightbulb,
-    LockMechanism, MotionSensor,
-    Outlet, SecuritySystem
+    LockMechanism,
+    MotionSensor,
+    Outlet,
+    SecuritySystem
 } from "hap-nodejs/dist/lib/gen/HomeKit";
 import {ISYScene} from "isy-js/lib/isyscene";
 import {
@@ -52,13 +56,33 @@ function ISYChangeHandler(isy: any, device: ISYNode) {
     }
 }
 
-let Service: typeof HapService, Characteristic: typeof HapCharacteristic, UUIDGen: typeof uuid
+let Service: typeof HapService, Characteristic: typeof HapCharacteristic, UUIDGen: typeof uuid, PlatformAccessory: typeof Accessory
+
+interface HomeBridgePlatform {
+    // Function invoked when homebridge tries to restore cached accessory.
+    // Developer can configure accessory at here (like setup event handler).
+    // Update current value.
+    configureAccessory(accessory: Accessory): void
+}
+
+interface HomeBridgeAPI {
+    on(event: string, callback: () => void): void
+
+    registerPlatformAccessories(plugin: string, platform: string, accessories: Accessory[]): void
+
+    unregisterPlatformAccessories(plugin: string, platform: string, accessories: Accessory[]): void
+}
+
+const pluginName = "homebridge-isy-js"
+const platformName = "isy-js"
 
 export default function (homebridge: any) {
     Service = homebridge.hap.Service;
     Characteristic = homebridge.hap.Characteristic;
     UUIDGen = homebridge.hap.uuid;
-    homebridge.registerPlatform("homebridge-isy-js", "isy-js", ISYPlatform);
+    PlatformAccessory = homebridge.platformAccessory
+
+    homebridge.registerPlatform(pluginName, platformName, ISYPlatform, true);
 }
 
 
@@ -98,9 +122,9 @@ interface ISYPlatformConfig {
     garageDoors?: GarageDoorConfig[]
 }
 
-class ISYPlatform {
+class ISYPlatform implements HomeBridgePlatform {
     log: Function
-
+    api: HomeBridgeAPI
     isy: ISY
 
     config: ISYPlatformConfig
@@ -112,7 +136,10 @@ class ISYPlatform {
     includeAllScenes: boolean
     includedScenes: string[]
 
-    constructor(log: Function, config: ISYPlatformConfig) {
+    discoveredAccessories: Map<string, ISYAccessoryBaseSetup<ISYNode>> | null
+    pendingAccessories: Set<Accessory>
+
+    constructor(log: Function, config: ISYPlatformConfig, api: HomeBridgeAPI) {
         this.log = log;
         this.config = config;
         this.host = config.host;
@@ -124,10 +151,71 @@ class ISYPlatform {
         this.includedScenes = config.includedScenes || []
         this.isy = new ISY(this.host, this.username, this.password, config.elkEnabled || false, ISYChangeHandler, config.useHttps, true, this.debugLoggingEnabled);
 
-        this.accessories = this.accessories.bind(this)
+        this.discoveredAccessories = null
+        this.pendingAccessories = new Set()
+        if (api) {
+            this.api = api
+            this.api.on('didFinishLaunching', () => {
+                this.initISYAccessories((accessories => {
+                    this.discoveredAccessories = accessories.reduce((map, newValue) => {
+                        map.set(newValue.device.address, newValue)
+                        return map
+                    }, new Map())
+                    const pendingAccessories = this.pendingAccessories
+                    this.pendingAccessories = new Set()
+                    // remove accessories that were cached by homebridge, but
+                    // they weren't discovered by ISY
+                    let todoAccessories: Accessory[] = []
+                    this.log(`configuring ${pendingAccessories.size} accessories`)
+                    for (let pendingAccessory of pendingAccessories) {
+                        const isyAccessory = this.configureCachedAccessory(pendingAccessory)
+                        if (isyAccessory) {
+                            this.discoveredAccessories.delete(isyAccessory.device.address)
+                        } else {
+                            todoAccessories.push(pendingAccessory)
+                        }
+                    }
+                    this.log(`unregistering ${todoAccessories.length} accessories`)
+                    this.api.unregisterPlatformAccessories(pluginName, platformName, todoAccessories)
+                    todoAccessories = []
+                    // register newly discovered accessories
+                    this.discoveredAccessories.forEach(value => {
+                        const accessory = value.newAccessory()
+                        value.adoptAccessory(accessory)
+                        todoAccessories.push(accessory)
+                    })
+                    this.log(`registering ${todoAccessories.length} new accessories`)
+                    this.api.registerPlatformAccessories(pluginName, platformName, todoAccessories)
+                }))
+            })
+        }
     }
 
-    logger(msg: any) {
+    configureAccessory(accessory: Accessory): void {
+        if (!this.discoveredAccessories) {
+            this.pendingAccessories.add(accessory)
+        } else {
+            this.configureCachedAccessory(accessory)
+        }
+    }
+
+    configureCachedAccessory(accessory: Accessory): ISYAccessoryBaseSetup<ISYNode> | undefined {
+        function extractCachedAccessorySerialNumber(accessory: Accessory) {
+            const accessoryInformationService = accessory.getService(Service.AccessoryInformation)
+            return accessoryInformationService!.getCharacteristic(Characteristic.SerialNumber)!.value
+        }
+
+        const accessorySerialNumber = extractCachedAccessorySerialNumber(accessory)
+
+        const isyAccessory = this.discoveredAccessories!.get(accessorySerialNumber as string);
+        if (isyAccessory) {
+            isyAccessory.adoptAccessory(accessory)
+        }
+        return isyAccessory
+    }
+
+
+    logger = (msg: any) => {
         if (this.debugLoggingEnabled || (process.env.ISYJSDEBUG != undefined && process.env.IYJSDEBUG != null)) {
             let timeStamp = new Date();
             this.log(timeStamp.getFullYear() + "-" + timeStamp.getMonth() + "-" + timeStamp.getDay() + "#" + timeStamp.getHours() + ":" + timeStamp.getMinutes() + ":" + timeStamp.getSeconds() + "- " + msg);
@@ -219,9 +307,8 @@ class ISYPlatform {
         return deviceName;
     }
 
-
     // Calls the isy-js library, retrieves the list of devices, and maps them to appropriate ISYXXXXAccessory devices.
-    accessories(callback: (accessories: ISYAccessoryBaseSetup<ISYNode>[]) => void) {
+    initISYAccessories(callback: (accessories: ISYAccessoryBaseSetup<ISYNode>[]) => void) {
         this.isy.initialize(() => {
             let results: ISYAccessoryBaseSetup<ISYNode>[] = [];
             let deviceList = this.isy.getDeviceList();
@@ -288,25 +375,28 @@ class ISYPlatform {
 /////////////////////////////////////////////////////////////////////////////////////////////////
 // BASE FOR ALL DEVICES
 
-abstract class ISYAccessoryBaseSetup<T extends ISYNode> extends Accessory {
+abstract class ISYAccessoryBaseSetup<T extends ISYNode> {
+    uuid: string
     log: Function
-
     device: T
     address: string
-    name: string
-    uuid_base: string
 
     // Provides common constructor tasks
     protected constructor(log: Function, device: T) {
-        const s = UUIDGen.generate(device.isy.isyAddress + ':' + device.address + 1);
-        super(device.name, s);
+        this.uuid = UUIDGen.generate(device.isy.isyAddress + ':' + device.address + 1);
         this.log = log;
         this.device = device;
-        this.address = device.address;
-        this.name = device.name;
     }
 
+    newAccessory(): Accessory {
+        return new PlatformAccessory(this.device.name, this.uuid)
+    }
+
+    abstract identify(callback: Function): void
+
     abstract handleExternalChange(): void;
+
+    abstract adoptAccessory(accessory: Accessory): void
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -317,12 +407,9 @@ abstract class ISYAccessoryBaseSetup<T extends ISYNode> extends Accessory {
 class ISYFanAccessory extends ISYAccessoryBaseSetup<ISYFanDevice> {
 
     fanService?: Fan
-    informationService?: AccessoryInformation
 
     constructor(log: Function, device: ISYFanDevice) {
         super(log, device)
-
-        this.getServices = this.getServices.bind(this)
     }
 
     identify(callback: Function) {
@@ -417,6 +504,10 @@ class ISYFanAccessory extends ISYAccessoryBaseSetup<ISYFanDevice> {
 
     // Mirrors change in the state of the underlying isj-js device object.
     handleExternalChange() {
+        if (this.device.updateRequested) {
+            this.log("FAN: " + this.device.name + " Ignoring external change");
+            return
+        }
         this.log("FAN: " + this.device.name + " Incoming external change. Device says: " + this.device.getCurrentFanState());
         const fanService = this.fanService
         if (fanService) {
@@ -428,31 +519,32 @@ class ISYFanAccessory extends ISYAccessoryBaseSetup<ISYFanDevice> {
         }
     }
 
-    // Returns the services supported by the fan device.
-    getServices() {
-        let informationService = new Service.AccessoryInformation(this.device.deviceFriendlyName, "info");
+    newAccessory(): Accessory {
+        const newAccessory = super.newAccessory()
+        newAccessory.addService(Service.Fan);
+        return newAccessory
+    }
 
-        informationService
+    adoptAccessory(accessory: Accessory): void {
+        let informationService = accessory.getService(Service.AccessoryInformation);
+
+        informationService!
             .setCharacteristic(Characteristic.Manufacturer, "SmartHome")
             .setCharacteristic(Characteristic.Model, this.device.deviceFriendlyName)
             .setCharacteristic(Characteristic.SerialNumber, this.device.address);
 
-        let fanService = new Service.Fan(this.device.deviceFriendlyName, "fan");
-
+        let fanService = accessory.getService(Service.Fan);
         this.fanService = fanService;
-        this.informationService = informationService;
 
-        fanService
+        fanService!
             .getCharacteristic(Characteristic.On)!
             .on(CharacteristicEventTypes.SET, this.setFanOnState.bind(this))
             .on(CharacteristicEventTypes.GET, this.getFanOnState.bind(this));
 
-        fanService
-            .addCharacteristic(Characteristic.RotationSpeed)
+        fanService!
+            .getCharacteristic(Characteristic.RotationSpeed)!
             .on(CharacteristicEventTypes.GET, this.getFanRotationSpeed.bind(this))
             .on(CharacteristicEventTypes.SET, this.setFanRotationSpeed.bind(this));
-
-        return [informationService, fanService];
     }
 }
 
@@ -462,13 +554,10 @@ class ISYFanAccessory extends ISYAccessoryBaseSetup<ISYFanDevice> {
 
 // Constructs an outlet. log = HomeBridge logger, device = isy-js device to wrap
 class ISYOutletAccessory extends ISYAccessoryBaseSetup<ISYOutletDevice> {
-    informationService: AccessoryInformation
-    outletService: Outlet
+    outletService?: Outlet
 
     constructor(log: Function, device: ISYOutletDevice) {
         super(log, device);
-
-        this.getServices = this.getServices.bind(this)
     }
 
 
@@ -503,34 +592,40 @@ class ISYOutletAccessory extends ISYAccessoryBaseSetup<ISYOutletDevice> {
 
     // Mirrors change in the state of the underlying isj-js device object.
     handleExternalChange() {
-        this.outletService
+        if (this.device.updateRequested) {
+            this.log("OUTLET: " + this.device.name + " Ignoring external change");
+            return
+        }
+        this.outletService!
             .setCharacteristic(Characteristic.On, this.device.getCurrentOutletState());
     }
 
-    // Returns the set of services supported by this object.
-    getServices() {
-        let informationService = new Service.AccessoryInformation(this.device.deviceFriendlyName, "info");
+    newAccessory(): Accessory {
+        const newAccessory = super.newAccessory()
+        newAccessory.addService(Service.Outlet);
+        return newAccessory
+    }
 
-        informationService
+    adoptAccessory(accessory: Accessory): void {
+        let informationService = accessory.getService(Service.AccessoryInformation);
+
+        informationService!
             .setCharacteristic(Characteristic.Manufacturer, "SmartHome")
             .setCharacteristic(Characteristic.Model, this.device.deviceFriendlyName)
+            .setCharacteristic(Characteristic.FirmwareRevision, this.device.isyType)
             .setCharacteristic(Characteristic.SerialNumber, this.device.address);
 
-        let outletService = new Service.Outlet(this.device.deviceFriendlyName, "outlet");
-
+        let outletService = accessory.getService(Service.Outlet);
         this.outletService = outletService;
-        this.informationService = informationService;
 
-        outletService
+        outletService!
             .getCharacteristic(Characteristic.On)!
             .on(CharacteristicEventTypes.SET, this.setOutletState.bind(this))
             .on(CharacteristicEventTypes.GET, this.getOutletState.bind(this));
 
-        outletService
+        outletService!
             .getCharacteristic(Characteristic.OutletInUse)!
             .on(CharacteristicEventTypes.GET, this.getOutletInUseState.bind(this));
-
-        return [informationService, outletService];
     }
 }
 
@@ -541,13 +636,10 @@ class ISYOutletAccessory extends ISYAccessoryBaseSetup<ISYOutletDevice> {
 // Constructs a lock accessory. log = homebridge logger, device = isy-js device object being wrapped
 class ISYLockAccessory extends ISYAccessoryBaseSetup<ISYLockDevice> {
 
-    lockService: LockMechanism
-    informationService: AccessoryInformation
+    lockService?: LockMechanism
 
     constructor(log: Function, device: ISYLockDevice) {
         super(log, device);
-
-        this.getServices = this.getServices.bind(this)
     }
 
     // Handles an identify request
@@ -585,36 +677,41 @@ class ISYLockAccessory extends ISYAccessoryBaseSetup<ISYLockDevice> {
 
     // Mirrors change in the state of the underlying isj-js device object.
     handleExternalChange() {
-        this.lockService
+        if (this.device.updateRequested) {
+            this.log("LOCK: " + this.device.name + " Ignoring external change");
+            return
+        }
+        this.lockService!
             .setCharacteristic(Characteristic.LockTargetState, this.getDeviceCurrentStateAsHK());
-        this.lockService
+        this.lockService!
             .setCharacteristic(Characteristic.LockCurrentState, this.getDeviceCurrentStateAsHK());
     }
 
-    // Returns the set of services supported by this object.
-    getServices() {
-        let informationService = new Service.AccessoryInformation(this.device.deviceFriendlyName, "info");
+    newAccessory(): Accessory {
+        let accessory = super.newAccessory();
+        accessory.addService(Service.LockMechanism);
+        return accessory
+    }
 
-        informationService
+    adoptAccessory(accessory: Accessory): void {
+        let informationService = accessory.getService(Service.AccessoryInformation)
+
+        informationService!
             .setCharacteristic(Characteristic.Manufacturer, "SmartHome")
             .setCharacteristic(Characteristic.Model, this.device.deviceFriendlyName)
             .setCharacteristic(Characteristic.SerialNumber, this.device.address);
 
-        let lockMechanismService = new Service.LockMechanism(this.device.deviceFriendlyName, "lock");
-
+        let lockMechanismService = accessory.getService(Service.LockMechanism);
         this.lockService = lockMechanismService;
-        this.informationService = informationService;
 
-        lockMechanismService
+        lockMechanismService!
             .getCharacteristic(Characteristic.LockTargetState)!
             .on(CharacteristicEventTypes.SET, this.setTargetLockState.bind(this))
             .on(CharacteristicEventTypes.GET, this.getTargetLockState.bind(this));
 
-        lockMechanismService
+        lockMechanismService!
             .getCharacteristic(Characteristic.LockCurrentState)!
             .on(CharacteristicEventTypes.GET, this.getLockCurrentState.bind(this));
-
-        return [informationService, lockMechanismService];
     }
 }
 
@@ -627,23 +724,16 @@ class ISYLockAccessory extends ISYAccessoryBaseSetup<ISYLockDevice> {
 class ISYLightAccessory extends ISYAccessoryBaseSetup<ISYLightDevice> {
 
     dimmable: boolean
-    informationService: AccessoryInformation
-    lightService: Lightbulb
+    lightService?: Lightbulb
 
     constructor(log: Function, device: ISYLightDevice) {
         super(log, device);
         this.dimmable = this.device.deviceType == "dimmableLight";
-
-        this.getServices = this.getServices.bind(this)
     }
 
     // Handles the identify command
     identify(callback: Function) {
-        this.device.sendLightCommand(true, () => {
-            this.device.sendLightCommand(false, () => {
-                callback();
-            });
-        });
+        callback()
     }
 
     // Handles request to set the current powerstate from homekit. Will ignore redundant commands.
@@ -662,11 +752,15 @@ class ISYLightAccessory extends ISYAccessoryBaseSetup<ISYLightDevice> {
 
     // Mirrors change in the state of the underlying isj-js device object.
     handleExternalChange() {
+        if (this.device.updateRequested) {
+            this.log("LIGHT: " + this.device.name + " Ignoring external change");
+            return
+        }
         this.log("LIGHT: " + this.device.name + " Handling external change for light");
-        this.lightService
+        this.lightService!
             .setCharacteristic(Characteristic.On, this.device.getCurrentLightState());
         if (this.dimmable) {
-            this.lightService
+            this.lightService!
                 .setCharacteristic(Characteristic.Brightness, this.device.getCurrentLightDimState());
         }
     }
@@ -688,6 +782,7 @@ class ISYLightAccessory extends ISYAccessoryBaseSetup<ISYLightDevice> {
             } else {
                 this.log("LIGHT: " + this.device.name + " Changing Brightness to " + level);
                 this.device.sendLightDimCommand(level, () => {
+                    this.log("LIGHT: " + this.device.name + " Done changing brightness to " + level);
                     callback();
                 });
             }
@@ -702,35 +797,37 @@ class ISYLightAccessory extends ISYAccessoryBaseSetup<ISYLightDevice> {
         callback(null, this.device.getCurrentLightDimState());
     }
 
-    // Returns the set of services supported by this object.
-    getServices() {
-        let informationService = new Service.AccessoryInformation(this.device.deviceFriendlyName, "info");
+    newAccessory(): Accessory {
+        let accessory = super.newAccessory();
+        accessory.addService(Service.Lightbulb);
+        return accessory
+    }
 
-        informationService
+    adoptAccessory(accessory: Accessory): void {
+        let informationService = accessory.getService(Service.AccessoryInformation);
+
+        informationService!
             .setCharacteristic(Characteristic.Manufacturer, "SmartHome")
             .setCharacteristic(Characteristic.Model, this.device.deviceFriendlyName)
             .setCharacteristic(Characteristic.SerialNumber, this.device.address);
 
-        let lightBulbService = new Service.Lightbulb(this.device.deviceFriendlyName, "lightbulb");
-
-        this.informationService = informationService;
+        let lightBulbService = accessory.getService(Service.Lightbulb);
         this.lightService = lightBulbService;
 
-        lightBulbService
+        lightBulbService!
             .getCharacteristic(Characteristic.On)!
             .on(CharacteristicEventTypes.SET, this.setPowerState.bind(this))
             .on(CharacteristicEventTypes.GET, this.getPowerState.bind(this));
 
         if (this.dimmable) {
-            lightBulbService
-                .addCharacteristic(Characteristic.Brightness)
+            lightBulbService!
+                .getCharacteristic(Characteristic.Brightness)!
                 .on(CharacteristicEventTypes.GET, this.getBrightness.bind(this))
                 .on(CharacteristicEventTypes.SET, this.setBrightness.bind(this));
         }
-
-        return [informationService, lightBulbService];
     }
 }
+
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
 // SCENES
@@ -740,22 +837,15 @@ class ISYLightAccessory extends ISYAccessoryBaseSetup<ISYLightDevice> {
 // Constructs the light accessory. log = homebridge logger, device = isy-js device object being wrapped
 class ISYSceneAccessory extends ISYAccessoryBaseSetup<ISYScene> {
 
-    informationService: AccessoryInformation;
-    lightService: Lightbulb
+    lightService?: Lightbulb
 
     constructor(log: Function, device: ISYScene) {
         super(log, device);
-
-        this.getServices = this.getServices.bind(this)
     }
 
     // Handles the identify command
     identify(callback: Function) {
-        this.device.sendLightCommand(true, () => {
-            this.device.sendLightCommand(false, () => {
-                callback();
-            });
-        });
+        callback()
     }
 
     // Handles request to set the current powerstate from homekit. Will ignore redundant commands.
@@ -776,7 +866,7 @@ class ISYSceneAccessory extends ISYAccessoryBaseSetup<ISYScene> {
     handleExternalChange() {
         this.log("SCENE: " + this.device.name + " Handling external change for light");
         if (this.device.getAreAllLightsInSpecifiedState(true) || this.device.getAreAllLightsInSpecifiedState(false)) {
-            this.lightService
+            this.lightService!
                 .setCharacteristic(Characteristic.On, this.device.getAreAllLightsInSpecifiedState(true));
         }
     }
@@ -790,26 +880,27 @@ class ISYSceneAccessory extends ISYAccessoryBaseSetup<ISYScene> {
         callback(null, this.calculatePowerState());
     }
 
-    // Returns the set of services supported by this object.
-    getServices() {
-        let informationService = new Service.AccessoryInformation("Insteon Scene", "info");
+    newAccessory(): Accessory {
+        let accessory = super.newAccessory();
+        accessory.addService(Service.Lightbulb);
+        return accessory
+    }
 
-        informationService
+    adoptAccessory(accessory: Accessory): void {
+        let informationService = accessory.getService(Service.AccessoryInformation);
+
+        informationService!
             .setCharacteristic(Characteristic.Manufacturer, "SmartHome")
             .setCharacteristic(Characteristic.Model, "Insteon Scene")
             .setCharacteristic(Characteristic.SerialNumber, this.device.address);
 
-        let lightBulbService = new Service.Lightbulb("Insteon Scene", "scene");
-
-        this.informationService = informationService;
+        let lightBulbService = accessory.getService(Service.Lightbulb);
         this.lightService = lightBulbService;
 
-        lightBulbService
+        lightBulbService!
             .getCharacteristic(Characteristic.On)!
             .on(CharacteristicEventTypes.SET, this.setPowerState.bind(this))
             .on(CharacteristicEventTypes.GET, this.getPowerState.bind(this));
-
-        return [informationService, lightBulbService];
     }
 }
 
@@ -820,14 +911,11 @@ class ISYSceneAccessory extends ISYAccessoryBaseSetup<ISYScene> {
 // Constructs a Door Window Sensor (contact sensor) accessory. log = HomeBridge logger, device = wrapped isy-js device.
 class ISYDoorWindowSensorAccessory extends ISYAccessoryBaseSetup<ISYDoorWindowDevice> {
     doorWindowState: boolean
-    sensorService: ContactSensor
-    informationService: AccessoryInformation
+    sensorService?: ContactSensor
 
     constructor(log: Function, device: ISYDoorWindowDevice) {
         super(log, device);
         this.doorWindowState = false;
-
-        this.getServices = this.getServices.bind(this)
     }
 
     // Handles the identify command.
@@ -848,29 +936,31 @@ class ISYDoorWindowSensorAccessory extends ISYAccessoryBaseSetup<ISYDoorWindowDe
 
     // Mirrors change in the state of the underlying isj-js device object.
     handleExternalChange() {
-        this.sensorService
+        this.sensorService!
             .setCharacteristic(Characteristic.ContactSensorState, this.translateCurrentDoorWindowState());
     }
 
-    // Returns the set of services supported by this object.
-    getServices() {
-        let informationService = new Service.AccessoryInformation(this.device.deviceFriendlyName, "info");
+    newAccessory(): Accessory {
+        let accessory = super.newAccessory();
+        accessory.addService(Service.ContactSensor);
+        return accessory
+    }
 
-        informationService
+    adoptAccessory(accessory: Accessory): void {
+        let informationService = accessory.getService(Service.AccessoryInformation);
+
+        informationService!
             .setCharacteristic(Characteristic.Manufacturer, "SmartHome")
             .setCharacteristic(Characteristic.Model, this.device.deviceFriendlyName)
             .setCharacteristic(Characteristic.SerialNumber, this.device.address);
 
-        let sensorService = new Service.ContactSensor(this.device.deviceFriendlyName, "sensor");
-
+        let sensorService = accessory.getService(Service.ContactSensor);
         this.sensorService = sensorService;
-        this.informationService = informationService;
 
-        sensorService
+        sensorService!
             .getCharacteristic(Characteristic.ContactSensorState)!
             .on(CharacteristicEventTypes.GET, this.getCurrentDoorWindowState.bind(this));
 
-        return [informationService, sensorService];
     }
 }
 
@@ -880,13 +970,10 @@ class ISYDoorWindowSensorAccessory extends ISYAccessoryBaseSetup<ISYDoorWindowDe
 
 // Constructs a Door Window Sensor (contact sensor) accessory. log = HomeBridge logger, device = wrapped isy-js device.
 class ISYMotionSensorAccessory extends ISYAccessoryBaseSetup<ISYMotionSensorDevice> {
-    sensorService: MotionSensor
-    informationService: AccessoryInformation
+    sensorService?: MotionSensor
 
     constructor(log: Function, device: ISYMotionSensorDevice) {
         super(log, device);
-
-        this.getServices = this.getServices.bind(this)
     }
 
     // Handles the identify command.
@@ -902,29 +989,30 @@ class ISYMotionSensorAccessory extends ISYAccessoryBaseSetup<ISYMotionSensorDevi
 
     // Mirrors change in the state of the underlying isj-js device object.
     handleExternalChange() {
-        this.sensorService
+        this.sensorService!
             .setCharacteristic(Characteristic.MotionDetected, this.device.getCurrentMotionSensorState());
     }
 
-    // Returns the set of services supported by this object.
-    getServices() {
-        let informationService = new Service.AccessoryInformation(this.device.deviceFriendlyName, "info");
+    newAccessory(): Accessory {
+        let accessory = super.newAccessory();
+        accessory.addService(Service.MotionSensor);
+        return accessory
+    }
 
-        informationService
+    adoptAccessory(accessory: Accessory): void {
+        let informationService = accessory.getService(Service.AccessoryInformation);
+
+        informationService!
             .setCharacteristic(Characteristic.Manufacturer, "SmartHome")
             .setCharacteristic(Characteristic.Model, this.device.deviceFriendlyName)
             .setCharacteristic(Characteristic.SerialNumber, this.device.address);
 
-        let sensorService = new Service.MotionSensor(this.device.deviceFriendlyName, "sensor");
-
+        let sensorService = accessory.getService(Service.MotionSensor);
         this.sensorService = sensorService;
-        this.informationService = informationService;
 
-        sensorService
+        sensorService!
             .getCharacteristic(Characteristic.MotionDetected)!
             .on(CharacteristicEventTypes.GET, this.getCurrentMotionSensorState.bind(this));
-
-        return [informationService, sensorService];
     }
 }
 
@@ -935,13 +1023,10 @@ class ISYMotionSensorAccessory extends ISYAccessoryBaseSetup<ISYMotionSensorDevi
 // Constructs the alarm panel accessory. log = HomeBridge logger, device = underlying isy-js device being wrapped
 class ISYElkAlarmPanelAccessory extends ISYAccessoryBaseSetup<ELKAlarmPanelDevice> {
 
-    alarmPanelService: SecuritySystem
-    informationService: AccessoryInformation
+    alarmPanelService?: SecuritySystem
 
     constructor(log: Function, device: ELKAlarmPanelDevice) {
         super(log, device);
-
-        this.getServices = this.getServices.bind(this)
     }
 
     // Handles the identify command
@@ -1032,38 +1117,44 @@ class ISYElkAlarmPanelAccessory extends ISYAccessoryBaseSetup<ELKAlarmPanelDevic
 
     // Mirrors change in the state of the underlying isj-js device object.
     handleExternalChange() {
+        if (this.device.updateRequested) {
+            this.log("ALARMPANEL: " + this.device.name + " Ignoring external change");
+            return
+        }
         this.log("ALARMPANEL: " + this.device.name + " Source device. Currenty state locally -" + this.device.getAlarmStatusAsText());
         this.log("ALARMPANEL: " + this.device.name + " Got alarm change notification. Setting HK target state to: " + this.translateAlarmTargetStateToHK() + " Setting HK Current state to: " + this.translateAlarmCurrentStateToHK());
-        this.alarmPanelService
+        this.alarmPanelService!
             .setCharacteristic(Characteristic.SecuritySystemTargetState, this.translateAlarmTargetStateToHK());
-        this.alarmPanelService
+        this.alarmPanelService!
             .setCharacteristic(Characteristic.SecuritySystemCurrentState, this.translateAlarmCurrentStateToHK());
     }
 
-    // Returns the set of services supported by this object.
-    getServices() {
-        let informationService = new Service.AccessoryInformation(this.device.deviceFriendlyName, "info");
+    newAccessory(): Accessory {
+        let accessory = super.newAccessory();
+        accessory.addService(Service.SecuritySystem);
+        return accessory
+    }
 
-        informationService
+    adoptAccessory(accessory: Accessory): void {
+        let informationService = accessory.getService(Service.AccessoryInformation);
+
+        informationService!
             .setCharacteristic(Characteristic.Manufacturer, "SmartHome")
             .setCharacteristic(Characteristic.Model, this.device.deviceFriendlyName)
             .setCharacteristic(Characteristic.SerialNumber, this.device.address);
 
-        let alarmPanelService = new Service.SecuritySystem(this.device.deviceFriendlyName, "security");
-
+        let alarmPanelService = accessory.getService(Service.SecuritySystem);
         this.alarmPanelService = alarmPanelService;
-        this.informationService = informationService;
 
-        alarmPanelService
+        alarmPanelService!
             .getCharacteristic(Characteristic.SecuritySystemTargetState)!
             .on(CharacteristicEventTypes.SET, this.setAlarmTargetState.bind(this))
             .on(CharacteristicEventTypes.GET, this.getAlarmTargetState.bind(this));
 
-        alarmPanelService
+        alarmPanelService!
             .getCharacteristic(Characteristic.SecuritySystemCurrentState)!
             .on(CharacteristicEventTypes.GET, this.getAlarmCurrentState.bind(this));
 
-        return [informationService, alarmPanelService];
     }
 }
 
@@ -1080,25 +1171,22 @@ class ISYGarageDoorAccessory
     relayDevice: ISYLightDevice
     timeToOpen: number
 
-    garageDoorService ?: GarageDoorOpener
-    informationService ?: AccessoryInformation;
+    garageDoorService?: GarageDoorOpener
 
     constructor(log: Function, sensorDevice: ISYDoorWindowDevice, relayDevice: ISYLightDevice, name: string, timeToOpen: number, alternate ?: boolean) {
         super(log, sensorDevice);
-        this.name = name;
         this.timeToOpen = timeToOpen;
         this.relayDevice = relayDevice;
         this.alternate = alternate || false;
         if (this.getSensorState()) {
-            this.log("GARAGE: " + this.name + " Initial set during startup the sensor is open so defaulting states to open");
+            this.log("GARAGE: " + this.device.name + " Initial set during startup the sensor is open so defaulting states to open");
             this.targetGarageState = Characteristic.TargetDoorState.OPEN;
             this.currentGarageState = Characteristic.CurrentDoorState.OPEN;
         } else {
-            this.log("GARAGE: " + this.name + " Initial set during startup the sensor is closed so defaulting states to closed");
+            this.log("GARAGE: " + this.device.name + " Initial set during startup the sensor is closed so defaulting states to closed");
             this.targetGarageState = Characteristic.TargetDoorState.CLOSED;
             this.currentGarageState = Characteristic.CurrentDoorState.CLOSED;
         }
-        this.getServices = this.getServices.bind(this)
     }
 
     // Handles an identify request
@@ -1209,6 +1297,10 @@ class ISYGarageDoorAccessory
 
     // Mirrors change in the state of the underlying isj-js device object.
     handleExternalChange() {
+        if (this.device.updateRequested) {
+            this.log("GARAGE: " + this.device.name + " Ignoring external change");
+            return
+        }
         // Handle startup.
         if (this.getSensorState()) {
             if (this.currentGarageState == Characteristic.CurrentDoorState.OPEN) {
@@ -1270,48 +1362,36 @@ class ISYGarageDoorAccessory
         callback(null, false);
     }
 
-    // Returns the set of services supported by this object.
-    getServices() {
-        let informationService = new Service.AccessoryInformation(this.name, "info");
+    newAccessory(): Accessory {
+        let accessory = super.newAccessory();
+        accessory.addService(Service.GarageDoorOpener);
+        return accessory
+    }
 
-        informationService
+    adoptAccessory(accessory: Accessory): void {
+        let informationService = accessory.getService(Service.AccessoryInformation);
+
+        informationService!
             .setCharacteristic(Characteristic.Manufacturer, "SmartHome")
-            .setCharacteristic(Characteristic.Model, this.name)
+            .setCharacteristic(Characteristic.Model, this.device.deviceFriendlyName)
             .setCharacteristic(Characteristic.SerialNumber, this.device.address);
 
-        let garageDoorService = new Service.GarageDoorOpener(this.name, "garage");
+        let garageDoorService = accessory.getService(Service.GarageDoorOpener);
 
         this.garageDoorService = garageDoorService;
-        this.informationService = informationService;
 
-        garageDoorService
+        garageDoorService!
             .getCharacteristic(Characteristic.TargetDoorState)!
             .on(CharacteristicEventTypes.SET, this.setTargetDoorState.bind(this))
             .on(CharacteristicEventTypes.GET, this.getTargetDoorState.bind(this));
 
-        garageDoorService
+        garageDoorService!
             .getCharacteristic(Characteristic.CurrentDoorState)!
             .on(CharacteristicEventTypes.SET, this.setCurrentDoorState.bind(this))
             .on(CharacteristicEventTypes.GET, this.getCurrentDoorState.bind(this));
 
-        garageDoorService
+        garageDoorService!
             .getCharacteristic(Characteristic.ObstructionDetected)!
             .on(CharacteristicEventTypes.GET, this.getObstructionState.bind(this));
-
-        return [informationService, garageDoorService];
     }
 }
-
-/*
-module.exports.platform = ISYPlatform;
-module.exports.ISYFanAccessory = ISYFanAccessory;
-module.exports.ISYLightAccessory = ISYLightAccessory;
-module.exports.ISYLockAccessory = ISYLockAccessory;
-module.exports.ISYOutletAccessory = ISYOutletAccessory;
-module.exports.ISYDoorWindowSensorAccessory = ISYDoorWindowSensorAccessory;
-module.exports.ISYMotionSensorAccessory = ISYMotionSensorAccessory;
-module.exports.ISYElkAlarmPanelAccessory = ISYElkAlarmPanelAccessory;
-module.exports.ISYSceneAccessory = ISYSceneAccessory;
-module.exports.ISYGarageDoorAccessory = ISYGarageDoorAccessory;
-
-*/
