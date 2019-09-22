@@ -1,21 +1,5 @@
-# homebridge-isy-js [![Build Status](https://api.travis-ci.org/rodtoll/homebridge-isy-js.svg?branch=master)](https://api.travis-ci.org/rodtoll/isy-js.svg?branch=master)
+# homebridge-isy-js
 
-# WANT A VERSION UNDER ACTIVE DEVELOPMENT?
-Other users have taken the work here and made numerous improvements. I have not tested any of these or can I vouch for their quality but I am providing pointers as a service. Below are the ones I know about:
-* https://github.com/pradeepmouli/homebridge-isy-js
-
-# ACTIVE DEVELOPMENT & SUPPORT DISCONTINUED
-I am sad to announce that I am discontinuing support for this homebridge plugin. This means I will no longer be addressing any open bugs, responding to feature requests or 
-releasing new versions. Between work and my home life there simply isn't the time. I will leave the repository online and the 
-package on npm but that is it. As this code is licensed under the MIT license you are of course welcome to branch this code and make it your own and use it in your 
-own projects -- but you do so, as always, with no warranty or support from me. 
-
-I want to thank everyone who helped along the way through questions and issues and code contributions -- your assistance was very much appreciated. And it made the 
-late nights and testing worth it. 
-
-If you find a good alternative and want others to know about it then open a new issue and provide a pointer. I might post a link here.
-
-# Old Readme..
 ISY-994 REST / WebSockets based HomeBridge platform. 
 
 NOTE: Homebridge-isy-js now includes support for garage door openers. Make sure you ensure a garage door is clear before closing it.
@@ -27,8 +11,6 @@ Also supports ZWave based locks. If elkEnabled is set to true then this will als
 Turns out that HomeBridge platforms can only return a maximum of 100 devices. So if you end up exposing more then 100 devices through HomeBridge the HomeKit
 software will fail adding the HomeBridge to your HomeKit network. To address this issue this platform provides an option to screen out devices based on 
 criteria specified in the config. 
-
-NEEDED: Someone with a Venstat Insteon thermostat to add support for it. I will accept submissions for implementations if someone is interested.
 
 # Requirements
 
@@ -112,14 +94,3 @@ Examples:
  sensor to determine current status. In particular, if you startup the system while the garage door is changing state (opening or closing)
  the code will likely get the state incorrect. If you get into this state, close the garage door and restart homebridge. The garage door is assumed open at startup and closed at startup if the contact sensor
  says the door is open or closed respectively.
-
- # History
-
- * 0.1.9 - Active development ended. 
- * 0.1.8 - Fixed crash in tests (race condition) and fixed crash in garage door device.
- * 0.1.7 - Fixed crash when there is no ignoreDevices entry. Also added new renameDevices section to enable device renaming. Added note to highlight ISY 99 is no longer supported, you needed an ISY 994 or newer. Added checks to ensure device list doesn't exceed 100 devices. Simplified ignore syntax so blank elements no longer needed.
- * 0.1.6 - Addressed crash when identify called on lights.
- * 0.1.4 - Release for testing alternative garage logic. No change for anyone wanting to use it with the standard logic.
- * 0.1.3 - Added improved debug output. Fixed bug where plugin would crash when there are no garage door opener present.
- * 0.1.2 - Added garage door opener support
- * Previous - Changes not tracked in this document.
