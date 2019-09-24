@@ -56,7 +56,8 @@ function ISYChangeHandler(isy: any, device: ISYNode) {
     }
 }
 
-let Service: typeof HapService, Characteristic: typeof HapCharacteristic, UUIDGen: typeof uuid, PlatformAccessory: typeof Accessory
+let Service: typeof HapService, Characteristic: typeof HapCharacteristic, UUIDGen: typeof uuid,
+    PlatformAccessory: typeof Accessory
 
 interface HomeBridgePlatform {
     // Function invoked when homebridge tries to restore cached accessory.
@@ -374,18 +375,43 @@ class ISYPlatform implements HomeBridgePlatform {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 // BASE FOR ALL DEVICES
-
 abstract class ISYAccessoryBaseSetup<T extends ISYNode> {
     uuid: string
     log: Function
     device: T
     address: string
 
+    updates: (() => void)[] = []
+
     // Provides common constructor tasks
     protected constructor(log: Function, device: T) {
         this.uuid = UUIDGen.generate(device.isy.isyAddress + ':' + device.address + 1);
         this.log = log;
         this.device = device;
+    }
+
+    scheduleCharacteristicUpdate(characteristicSetCallback: CharacteristicSetCallback, update: (callback: CharacteristicSetCallback) => void) {
+        const fun = () => {
+            update(characteristicSetCallback)
+            this.processUpdates()
+        }
+
+        if (this.updates.push(fun) == 1) {
+            this.processUpdates()
+        }
+    }
+
+    processUpdates() {
+        setImmediate(() => {
+            this.processNextUpdate()
+        })
+    }
+
+    processNextUpdate() {
+        const update = this.updates.shift()
+        if (update) {
+            update()
+        }
     }
 
     newAccessory(): Accessory {
@@ -460,17 +486,14 @@ class ISYFanAccessory extends ISYAccessoryBaseSetup<ISYFanDevice> {
 
     // Sets the current state of the fan from the 0-100 level of HK to the isy-js level.
     setFanRotationSpeed(fanStateHK: number, callback: CharacteristicSetCallback) {
-        this.log("FAN: " + this.device.name + " Sending command to set fan state(pre-translate) to: " + fanStateHK);
-        let newFanState = this.translateHKToFanSpeed(fanStateHK);
-        this.log("FAN: " + this.device.name + " Sending command to set fan state to: " + newFanState);
-        if (newFanState != this.device.getCurrentFanState()) {
+        this.log(`FAN: ${this.device.name} setFanRotationSpeed(fanStateHK)`);
+        this.scheduleCharacteristicUpdate(callback, doneCallback => {
+            let newFanState = this.translateHKToFanSpeed(fanStateHK);
+            this.log("FAN: " + this.device.name + " Sending command to set fan state to: " + newFanState);
             this.device.sendFanCommand(newFanState, () => {
-                callback();
+                doneCallback();
             });
-        } else {
-            this.log("FAN: " + this.device.name + " Fan command does not change actual speed");
-            callback();
-        }
+        })
     }
 
     // Returns true if the fan is on
@@ -487,19 +510,17 @@ class ISYFanAccessory extends ISYAccessoryBaseSetup<ISYFanDevice> {
 
     // Sets the fan state based on the value of the On characteristic. Default to Medium for on.
     setFanOnState(onState: boolean, callback: CharacteristicSetCallback) {
-        this.log("FAN: " + this.device.name + " Setting fan on state to: " + onState + " Device says: " + this.device.getCurrentFanState());
-        if (onState != this.getIsFanOn()) {
+        this.log(`FAN: ${this.device.name} setFanOnState(${onState})`);
+        this.scheduleCharacteristicUpdate(callback, doneCallback => {
+            this.log("FAN: " + this.device.name + " Setting fan on state to: " + onState + " Device says: " + this.device.getCurrentFanState());
             if (onState) {
                 this.log("FAN: " + this.device.name + " Setting fan speed to medium");
-                this.setFanRotationSpeed(this.translateFanSpeedToHK(ISYFanDeviceState.MEDIUM), callback);
+                this.setFanRotationSpeed(this.translateFanSpeedToHK(ISYFanDeviceState.MEDIUM), doneCallback);
             } else {
                 this.log("FAN: " + this.device.name + " Setting fan speed to off");
-                this.setFanRotationSpeed(this.translateFanSpeedToHK(ISYFanDeviceState.OFF), callback);
+                this.setFanRotationSpeed(this.translateFanSpeedToHK(ISYFanDeviceState.OFF), doneCallback);
             }
-        } else {
-            this.log("FAN: " + this.device.name + " Fan command does not change actual state");
-            callback();
-        }
+        })
     }
 
     // Mirrors change in the state of the underlying isj-js device object.
@@ -569,14 +590,13 @@ class ISYOutletAccessory extends ISYAccessoryBaseSetup<ISYOutletDevice> {
 
     // Handles a request to set the outlet state. Ignores redundant sets based on current states.
     setOutletState(outletState: boolean, callback: CharacteristicSetCallback) {
-        this.log("OUTLET: " + this.device.name + " Sending command to set outlet state to: " + outletState);
-        if (outletState != this.device.getCurrentOutletState()) {
+        this.log(`OUTLET: ${this.device.name} setOutletState(${outletState})`);
+        this.scheduleCharacteristicUpdate(callback, doneCallback => {
             this.device.sendOutletCommand(outletState, () => {
-                callback();
+                doneCallback();
             });
-        } else {
-            callback();
-        }
+        });
+
     }
 
     // Handles a request to get the current outlet state based on underlying isy-js device object.
@@ -649,15 +669,13 @@ class ISYLockAccessory extends ISYAccessoryBaseSetup<ISYLockDevice> {
 
     // Handles a set to the target lock state. Will ignore redundant commands.
     setTargetLockState(lockState: number, callback: CharacteristicSetCallback) {
-        this.log(this, "LOCK: " + this.device.name + " Sending command to set lock state to: " + lockState);
-        if (lockState != this.getDeviceCurrentStateAsHK()) {
+        this.log(this, `LOCK: ${this.device.name} setTargetLockState(${lockState})`);
+        this.scheduleCharacteristicUpdate(callback, doneCallback => {
             let targetLockValue = lockState != 0;
             this.device.sendLockCommand(targetLockValue, () => {
-                callback();
+                doneCallback();
             });
-        } else {
-            callback();
-        }
+        })
     }
 
     // Translates underlying lock state into the corresponding homekit state
@@ -725,6 +743,7 @@ class ISYLightAccessory extends ISYAccessoryBaseSetup<ISYLightDevice> {
 
     dimmable: boolean
     lightService?: Lightbulb
+    pendingPowerState?: boolean
 
     constructor(log: Function, device: ISYLightDevice) {
         super(log, device);
@@ -738,16 +757,21 @@ class ISYLightAccessory extends ISYAccessoryBaseSetup<ISYLightDevice> {
 
     // Handles request to set the current powerstate from homekit. Will ignore redundant commands.
     setPowerState(powerOn: boolean, callback: CharacteristicSetCallback) {
-        this.log("LIGHT: " + this.device.name + " Setting powerstate to " + powerOn);
-        if (powerOn != this.device.getCurrentLightState()) {
-            this.log("LIGHT: " + this.device.name + " Changing powerstate to " + powerOn);
-            this.device.sendLightCommand(powerOn, () => {
-                callback();
-            });
-        } else {
-            this.log("LIGHT: " + this.device.name + " Ignoring redundant setPowerState");
-            callback();
-        }
+        this.log(`LIGHT: ${this.device.name} setPowerState(${powerOn})`);
+        this.scheduleCharacteristicUpdate(callback, doneCallback => {
+            const currentLightState = this.device.getCurrentLightState();
+            this.log("LIGHT: " + this.device.name + " Changing powerstate to " + powerOn + ", currentState=" + currentLightState);
+
+            if (powerOn != currentLightState && powerOn !== this.pendingPowerState) {
+                this.pendingPowerState = powerOn
+                this.device.sendLightCommand(powerOn, () => {
+                    this.pendingPowerState = undefined
+                    doneCallback();
+                });
+            } else {
+                doneCallback();
+            }
+        })
     }
 
     // Mirrors change in the state of the underlying isj-js device object.
@@ -772,24 +796,27 @@ class ISYLightAccessory extends ISYAccessoryBaseSetup<ISYLightDevice> {
 
     // Handles request to set the brightness level of dimmable lights. Ignore redundant commands.
     setBrightness(level: number, callback: CharacteristicSetCallback) {
-        this.log("LIGHT: " + this.device.name + " Setting brightness to " + level);
-        if (level != this.device.getCurrentLightDimState()) {
-            if (level == 0) {
-                this.log("LIGHT: " + this.device.name + " Brightness set to 0, sending off command");
-                this.device.sendLightCommand(false, () => {
-                    callback();
-                });
+        this.log(`LIGHT: ${this.device.name} setBrightness(${level})`);
+        this.scheduleCharacteristicUpdate(callback, doneCallback => {
+            if (level != this.device.getCurrentLightDimState()) {
+                if (level == 0) {
+                    this.log("LIGHT: " + this.device.name + " Brightness set to 0, sending off command");
+                    this.pendingPowerState = false
+                    this.device.sendLightCommand(false, () => {
+                        this.pendingPowerState = undefined
+                        doneCallback();
+                    });
+                } else {
+                    this.log("LIGHT: " + this.device.name + " Changing Brightness to " + level);
+                    this.device.sendLightDimCommand(level, () => {
+                        this.log("LIGHT: " + this.device.name + " Done changing brightness to " + level);
+                        doneCallback();
+                    });
+                }
             } else {
-                this.log("LIGHT: " + this.device.name + " Changing Brightness to " + level);
-                this.device.sendLightDimCommand(level, () => {
-                    this.log("LIGHT: " + this.device.name + " Done changing brightness to " + level);
-                    callback();
-                });
+                doneCallback()
             }
-        } else {
-            this.log("LIGHT: " + this.device.name + " Ignoring redundant setBrightness");
-            callback();
-        }
+        })
     }
 
     // Handles a request to get the current brightness level for dimmable lights.
@@ -851,15 +878,17 @@ class ISYSceneAccessory extends ISYAccessoryBaseSetup<ISYScene> {
     // Handles request to set the current powerstate from homekit. Will ignore redundant commands.
     setPowerState(powerOn: boolean, callback: CharacteristicSetCallback) {
         this.log("SCENE: " + this.device.name + " Setting powerstate to " + powerOn);
-        if (!this.device.getAreAllLightsInSpecifiedState(powerOn)) {
-            this.log("SCENE: " + this.device.name + " Changing powerstate to " + powerOn);
-            this.device.sendLightCommand(powerOn, () => {
-                callback();
-            });
-        } else {
-            this.log("SCENE: " + this.device.name + " Ignoring redundant setPowerState");
-            callback();
-        }
+        this.scheduleCharacteristicUpdate(callback, doneCallback => {
+            if (!this.device.getAreAllLightsInSpecifiedState(powerOn)) {
+                this.log("SCENE: " + this.device.name + " Changing powerstate to " + powerOn);
+                this.device.sendLightCommand(powerOn, () => {
+                    doneCallback();
+                });
+            } else {
+                this.log("SCENE: " + this.device.name + " Ignoring redundant setPowerState");
+                doneCallback();
+            }
+        })
     }
 
     // Mirrors change in the state of the underlying isj-js device object.
@@ -1036,17 +1065,20 @@ class ISYElkAlarmPanelAccessory extends ISYAccessoryBaseSetup<ELKAlarmPanelDevic
 
     // Handles the request to set the alarm target state
     setAlarmTargetState(targetStateHK: number, callback: CharacteristicSetCallback) {
-        this.log("ALARMSYSTEM: " + this.device.name + "Sending command to set alarm panel state to: " + targetStateHK);
-        let targetState = this.translateHKToAlarmTargetState(targetStateHK);
-        this.log("ALARMSYSTEM: " + this.device.name + " Would send the target state of: " + targetState);
-        if (this.device.getAlarmMode() != targetState) {
-            this.device.sendSetAlarmModeCommand(targetState, () => {
-                callback();
-            });
-        } else {
-            this.log("ALARMSYSTEM: " + this.device.name + " Redundant command, already in that state.");
-            callback();
-        }
+        this.log(`ALARMSYSTEM: ${this.device.name} setAlarmTargetState(${targetStateHK})`)
+        this.scheduleCharacteristicUpdate(callback, doneCallback => {
+            this.log("ALARMSYSTEM: " + this.device.name + "Sending command to set alarm panel state to: " + targetStateHK);
+            let targetState = this.translateHKToAlarmTargetState(targetStateHK);
+            this.log("ALARMSYSTEM: " + this.device.name + " Would send the target state of: " + targetState);
+            if (this.device.getAlarmMode() != targetState) {
+                this.device.sendSetAlarmModeCommand(targetState, () => {
+                    doneCallback();
+                });
+            } else {
+                this.log("ALARMSYSTEM: " + this.device.name + " Redundant command, already in that state.");
+                doneCallback();
+            }
+        })
     }
 
     // Translates from the current state of the elk alarm system into a homekit compatible state. The elk panel has a lot more
@@ -1210,61 +1242,63 @@ class ISYGarageDoorAccessory
 
     // Handles a set to the target lock state. Will ignore redundant commands.
     setTargetDoorState(targetState: number, callback: CharacteristicSetCallback) {
-        if (targetState == this.targetGarageState) {
-            this.log("GARAGE: Ignoring redundant set of target state");
-            callback();
-            return;
-        }
-        this.targetGarageState = targetState;
-        if (this.currentGarageState == Characteristic.CurrentDoorState.OPEN) {
-            if (targetState == Characteristic.TargetDoorState.CLOSED) {
-                this.log("GARAGE: " + this.device.name + " Current state is open and target is closed. Changing state to closing and sending command");
-                const garageDoorService = this.garageDoorService
-                if (garageDoorService) {
-                    garageDoorService
-                        .setCharacteristic(Characteristic.CurrentDoorState, Characteristic.CurrentDoorState.CLOSING);
-
-                    this.sendGarageDoorCommand(callback);
-                }
-            }
-        } else if (this.currentGarageState == Characteristic.CurrentDoorState.CLOSED) {
-            if (targetState == Characteristic.TargetDoorState.OPEN) {
-                this.log("GARAGE: " + this.device.name + " Current state is closed and target is open. Waiting for sensor change to trigger opening state");
-                this.sendGarageDoorCommand(callback);
+        this.scheduleCharacteristicUpdate(callback, doneCallback => {
+            if (targetState == this.targetGarageState) {
+                this.log("GARAGE: Ignoring redundant set of target state");
+                doneCallback();
                 return;
             }
-        } else if (this.currentGarageState == Characteristic.CurrentDoorState.OPENING) {
-            if (targetState == Characteristic.TargetDoorState.CLOSED) {
-                this.log("GARAGE: " + this.device.name + " Current state is opening and target is closed. Sending command and changing state to closing");
-                const garageDoorService = this.garageDoorService
-                if (garageDoorService) {
-                    garageDoorService
-                        .setCharacteristic(Characteristic.CurrentDoorState, Characteristic.CurrentDoorState.CLOSING);
+            this.targetGarageState = targetState;
+            if (this.currentGarageState == Characteristic.CurrentDoorState.OPEN) {
+                if (targetState == Characteristic.TargetDoorState.CLOSED) {
+                    this.log("GARAGE: " + this.device.name + " Current state is open and target is closed. Changing state to closing and sending command");
+                    const garageDoorService = this.garageDoorService
+                    if (garageDoorService) {
+                        garageDoorService
+                            .setCharacteristic(Characteristic.CurrentDoorState, Characteristic.CurrentDoorState.CLOSING);
 
-                    this.sendGarageDoorCommand(() => {
-                        setTimeout(() => {
-                            this.sendGarageDoorCommand(callback);
-                        }, 3000);
-                    });
+                        this.sendGarageDoorCommand(doneCallback);
+                    }
                 }
-                return;
-            }
-        } else if (this.currentGarageState == Characteristic.CurrentDoorState.CLOSING) {
-            if (targetState == Characteristic.TargetDoorState.OPEN) {
-                this.log("GARAGE: " + this.device.name + " Current state is closing and target is open. Sending command and setting timeout to complete");
-                const garageDoorService = this.garageDoorService
-                if (garageDoorService) {
-                    garageDoorService
-                        .setCharacteristic(Characteristic.CurrentDoorState, Characteristic.CurrentDoorState.OPENING);
-                    this.sendGarageDoorCommand(() => {
-                        this.sendGarageDoorCommand(callback);
-                        setTimeout(() => {
-                            this.completeOpen()
-                        }, this.timeToOpen);
-                    });
+            } else if (this.currentGarageState == Characteristic.CurrentDoorState.CLOSED) {
+                if (targetState == Characteristic.TargetDoorState.OPEN) {
+                    this.log("GARAGE: " + this.device.name + " Current state is closed and target is open. Waiting for sensor change to trigger opening state");
+                    this.sendGarageDoorCommand(doneCallback);
+                    return;
+                }
+            } else if (this.currentGarageState == Characteristic.CurrentDoorState.OPENING) {
+                if (targetState == Characteristic.TargetDoorState.CLOSED) {
+                    this.log("GARAGE: " + this.device.name + " Current state is opening and target is closed. Sending command and changing state to closing");
+                    const garageDoorService = this.garageDoorService
+                    if (garageDoorService) {
+                        garageDoorService
+                            .setCharacteristic(Characteristic.CurrentDoorState, Characteristic.CurrentDoorState.CLOSING);
+
+                        this.sendGarageDoorCommand(() => {
+                            setTimeout(() => {
+                                this.sendGarageDoorCommand(doneCallback);
+                            }, 3000);
+                        });
+                    }
+                    return;
+                }
+            } else if (this.currentGarageState == Characteristic.CurrentDoorState.CLOSING) {
+                if (targetState == Characteristic.TargetDoorState.OPEN) {
+                    this.log("GARAGE: " + this.device.name + " Current state is closing and target is open. Sending command and setting timeout to complete");
+                    const garageDoorService = this.garageDoorService
+                    if (garageDoorService) {
+                        garageDoorService
+                            .setCharacteristic(Characteristic.CurrentDoorState, Characteristic.CurrentDoorState.OPENING);
+                        this.sendGarageDoorCommand(() => {
+                            this.sendGarageDoorCommand(doneCallback);
+                            setTimeout(() => {
+                                this.completeOpen()
+                            }, this.timeToOpen);
+                        });
+                    }
                 }
             }
-        }
+        })
     }
 
     // Handles request to get the current lock state for homekit
@@ -1273,8 +1307,10 @@ class ISYGarageDoorAccessory
     }
 
     setCurrentDoorState(newState: number, callback: CharacteristicSetCallback) {
-        this.currentGarageState = newState;
-        callback();
+        this.scheduleCharacteristicUpdate(callback, doneCallback => {
+            this.currentGarageState = newState;
+            doneCallback();
+        })
     }
 
     // Handles request to get the target lock state for homekit
